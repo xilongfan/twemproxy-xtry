@@ -72,6 +72,206 @@ static struct option long_options[] = {
 
 static char short_options[] = "hVtdDv:o:c:s:i:a:p:m:";
 
+/*XTRY
+*/
+char** str_split(char* a_str, const char a_delim)
+{
+    char** result    = 0;
+    size_t count     = 0;
+    char* tmp        = a_str;
+    char* last_comma = 0;
+    char delim[2];
+    delim[0] = a_delim;
+    delim[1] = 0;
+
+    /* Count how many elements will be extracted. */
+    while (*tmp)
+    {
+        if (a_delim == *tmp)
+        {
+            count++;
+            last_comma = tmp;
+        }
+        tmp++;
+    }
+
+    /* Add space for trailing token. */
+    count += last_comma < (a_str + strlen(a_str) - 1);
+
+    /* Add space for terminating null string so caller
+       knows where the list of returned strings ends. */
+    count++;
+
+    result = malloc(sizeof(char*) * count);
+
+    if (result)
+    {
+        size_t idx  = 0;
+        char* token = strtok(a_str, delim);
+
+        while (token)
+        {
+            assert(idx < count);
+            *(result + idx++) = strdup(token);
+            token = strtok(0, delim);
+        }
+        assert(idx == count - 1);
+        *(result + idx) = 0;
+    }
+
+    return result;
+}
+
+
+static void
+conf_server_init2(struct conf_server *cs)
+{
+    string_init(&cs->pname);
+    string_init(&cs->name);
+    string_init(&cs->addrstr);
+    cs->port = 0;
+    cs->weight = 0;
+
+    memset(&cs->info, 0, sizeof(cs->info));
+
+    cs->valid = 0;
+
+    log_debug(LOG_VVERB, "init conf server %p", cs);
+}
+
+static rstatus_t
+server_pool_each_run(void *elem, void *data)
+{
+    return server_pool_run(elem);
+}
+static rstatus_t
+server_pool_each_calc_connections(void *elem, void *data)
+{
+    struct server_pool *sp = elem;
+    struct context *ctx = data;
+
+    ctx->max_nsconn += sp->server_connections * array_n(&sp->server);
+    ctx->max_nsconn += 1; /* pool listening socket */
+
+    return NC_OK;
+}
+void
+add_new_server(struct instance *nci, struct context *ctx, char *host, int port)
+{
+    rstatus_t status;
+    struct conf_server field;
+    char buf[100];    
+
+    conf_server_init2(&field);
+
+    sprintf(buf, "%s:%d:1", host, port);
+    status = string_copy(&field.pname, (uint8_t*)buf, strlen(buf));
+
+    field.weight = 1;
+    field.port = port;
+    
+    sprintf(buf, "%s:%d", host, port);
+    status = string_copy(&field.name, (uint8_t*)buf, strlen(buf));
+    
+    status = string_copy(&field.addrstr, (uint8_t*)host, strlen(host));
+
+    field.valid = 1;
+    sprintf(stderr, "adding server to server pool");
+
+    log_warn("XTRY: pool nelem=%d, nalloc=%d",ctx->pool.nelem, ctx->pool.nalloc);
+    struct server_pool *sp = array_top(&ctx->pool);
+
+    struct array *servers = &sp->server;
+
+    log_warn("XTRY: before adding servers nelem=%d, nalloc=%d",servers->nelem, servers->nalloc);
+    add_server(servers, &field, sp);
+    log_warn("XTRY: after adding servers nelem=%d, nalloc=%d",servers->nelem, servers->nalloc);
+
+
+    /* compute max server connections */
+    ctx->max_nsconn = 0;
+    status = array_each(&ctx->pool, server_pool_each_calc_connections, ctx);
+
+
+    /* update server pool continuum */
+    status = array_each(&ctx->pool, server_pool_each_run, NULL);
+
+}
+
+int n_max = 0;
+
+void *zookeeper_monitor(void *arg)
+{
+    struct instance *nci = arg;
+    int ret_val = -1;
+    char **node_arr = NULL;
+    int node_cnt = 0;
+    char *node_data = NULL;
+    char buf[100];
+    int i;
+    char** host;
+
+    log_warn("XTRY: zookeeper_monitor thread started\n");
+    zookeeper_client * zkc_client = create_zookeeper_client();
+    log_warn("connecting...");
+    ret_val = init_zkc_connection(zkc_client, "10.2.13.66:2181", "/xtry-test");
+    log_warn("connected!\n");
+
+    for(;;) {
+        ret_val = get_child_nodes(zkc_client, "/xtry-test/redis-inst", &node_arr, &node_cnt);
+        log_warn("====>checking nodes: get %d nodes",node_cnt);
+        //TODO delete node 
+        if(node_cnt > n_max) {
+            for(i=n_max; i<node_cnt; i++) 
+            {
+		sprintf(buf, "/xtry-test/redis-inst/%s", node_arr[i]);
+                ret_val = get_node_data(zkc_client, buf, &node_data);
+                log_warn("XTRY: =================> new radis node auto discovered: %s\n", node_data);
+                host = str_split(node_data, ':');
+                add_new_server(nci, nci->ctx, host[0], atoi(host[1]));
+            }
+            n_max = node_cnt;
+        } else {
+       	    log_warn("nothing to update\n");
+	}
+        sleep(5);
+    }
+    return NULL;
+}
+
+void *zookeeper_monitor_sync(struct instance *nci)
+{
+    int ret_val = -1;
+    char **node_arr = NULL;
+    int node_cnt = 0;
+    char *node_data = NULL;
+    char buf[100];
+    int i;
+    char** host;
+
+    zookeeper_client * zkc_client = create_zookeeper_client();
+    ret_val = init_zkc_connection(zkc_client, "10.2.13.66:2181", "/xtry-test");
+
+        ret_val = get_child_nodes(zkc_client, "/xtry-test/redis-inst", &node_arr, &node_cnt);
+        //TODO delete node 
+        if(node_cnt > n_max) {
+            for(i=n_max; i<node_cnt; i++) 
+            {
+		sprintf(buf, "/xtry-test/redis-inst/%s", node_arr[i]);
+                ret_val = get_node_data(zkc_client, buf, &node_data);
+                host = str_split(node_data, ':');
+       	        log_warn(">>>>>>>>>>>>>>>>>> before adding new servers \n");
+                add_new_server(nci, nci->ctx, host[0], atoi(host[1]));
+       	        log_warn(">>>>>>>>>>>>>>>>>> after adding new servers \n");
+            }
+            n_max = node_cnt;
+        } else {
+       	    log_warn("nothing to update\n");
+	}
+    return NULL;
+}
+
+
 static rstatus_t
 nc_daemonize(int dump_core)
 {
@@ -521,12 +721,18 @@ nc_run(struct instance *nci)
 {
     rstatus_t status;
     struct context *ctx;
+    pthread_t zoo_thread;
 
     ctx = core_start(nci);
     if (ctx == NULL) {
         return;
     }
 
+    zookeeper_monitor_sync(nci);
+    if(pthread_create(&zoo_thread, NULL, zookeeper_monitor, nci)) {
+        fprintf(stderr, "Error creating thread\n");
+        return 1;
+    }
     /* run rabbit run */
     for (;;) {
         status = core_loop(ctx);
@@ -536,188 +742,18 @@ nc_run(struct instance *nci)
     }
 
     core_stop(ctx);
-}
-
-char** str_split(char* a_str, const char a_delim)
-{
-    char** result    = 0;
-    size_t count     = 0;
-    char* tmp        = a_str;
-    char* last_comma = 0;
-    char delim[2];
-    delim[0] = a_delim;
-    delim[1] = 0;
-
-    /* Count how many elements will be extracted. */
-    while (*tmp)
-    {
-        if (a_delim == *tmp)
-        {
-            count++;
-            last_comma = tmp;
-        }
-        tmp++;
+    if(pthread_join(zoo_thread, NULL)) {
+        fprintf(stderr, "Error joining thread\n");
+        return 2;
     }
-
-    /* Add space for trailing token. */
-    count += last_comma < (a_str + strlen(a_str) - 1);
-
-    /* Add space for terminating null string so caller
-       knows where the list of returned strings ends. */
-    count++;
-
-    result = malloc(sizeof(char*) * count);
-
-    if (result)
-    {
-        size_t idx  = 0;
-        char* token = strtok(a_str, delim);
-
-        while (token)
-        {
-            assert(idx < count);
-            *(result + idx++) = strdup(token);
-            token = strtok(0, delim);
-        }
-        assert(idx == count - 1);
-        *(result + idx) = 0;
-    }
-
-    return result;
 }
 
-
-/*XTRY
-*/
-static void
-conf_server_init2(struct conf_server *cs)
-{
-    string_init(&cs->pname);
-    string_init(&cs->name);
-    string_init(&cs->addrstr);
-    cs->port = 0;
-    cs->weight = 0;
-
-    memset(&cs->info, 0, sizeof(cs->info));
-
-    cs->valid = 0;
-
-    log_debug(LOG_VVERB, "init conf server %p", cs);
-}
-
-static rstatus_t
-server_pool_each_run(void *elem, void *data)
-{
-    return server_pool_run(elem);
-}
-static rstatus_t
-server_pool_each_calc_connections(void *elem, void *data)
-{
-    struct server_pool *sp = elem;
-    struct context *ctx = data;
-
-    ctx->max_nsconn += sp->server_connections * array_n(&sp->server);
-    ctx->max_nsconn += 1; /* pool listening socket */
-
-    return NC_OK;
-}
-void
-add_new_server(struct instance *nci, struct context *ctx, char *host, int port)
-{
-    rstatus_t status;
-    struct conf_server field;
-    char buf[100];    
-
-    conf_server_init2(&field);
-
-    sprintf(buf, "%s:%d:1", host, port);
-    status = string_copy(&field.pname, (uint8_t*)buf, strlen(buf));
-
-    field.weight = 1;
-    field.port = port;
-    
-    sprintf(buf, "%s:%d", host, port);
-    status = string_copy(&field.name, (uint8_t*)buf, strlen(buf));
-    
-    status = string_copy(&field.addrstr, (uint8_t*)host, strlen(host));
-
-    field.valid = 1;
-    sprintf(stderr, "adding server to server pool");
-
-    log_warn("XTRY: pool nelem=%d, nalloc=%d",ctx->pool.nelem, ctx->pool.nalloc);
-    struct server_pool *sp = array_top(&ctx->pool);
-
-    struct array *servers = &sp->server;
-
-    log_warn("XTRY: before adding servers nelem=%d, nalloc=%d",servers->nelem, servers->nalloc);
-    add_server(servers, &field, sp);
-    log_warn("XTRY: after adding servers nelem=%d, nalloc=%d",servers->nelem, servers->nalloc);
-
-
-    /* compute max server connections */
-    ctx->max_nsconn = 0;
-    status = array_each(&ctx->pool, server_pool_each_calc_connections, ctx);
-
-
-    /* update server pool continuum */
-    status = array_each(&ctx->pool, server_pool_each_run, NULL);
-
-}
-
-
-
-void *zookeeper_monitor(void *arg)
-{
-    struct instance *nci = arg;
-    int ret_val = -1;
-    char **node_arr = NULL;
-    int node_cnt = 0;
-    char *node_data = NULL;
-    char buf[100];
-    int i;
-    char** host;
-    int n_max = 0;
-
-    sleep(3);
-
-    fprintf(stderr, "XTRY: zookeeper_monitor thread started\n");
-    zookeeper_client * zkc_client = create_zookeeper_client();
-    fprintf(stderr, "connecting...");
-    ret_val = init_zkc_connection(zkc_client, "10.2.13.66:2181", "/xtry-test");
-    fprintf(stderr, "connected!\n");
-
-    for(;;) {
-        ret_val = get_child_nodes(zkc_client, "/xtry-test/redis-inst", &node_arr, &node_cnt);
-        fprintf(stderr, "====>checking nodes: get %d nodes",node_cnt);
-        //TODO delete node 
-        if(node_cnt > n_max) {
-            for(i=n_max; i<node_cnt; i++) 
-            {
-		sprintf(buf, "/xtry-test/redis-inst/%s", node_arr[i]);
-		fprintf(stderr, " zookeeper file: %s\n", buf);
-                ret_val = get_node_data(zkc_client, buf, &node_data);
-		fprintf(stderr, "ret_val=%d\n", ret_val);
-                fprintf(stderr, "XTRY: =================> new radis node auto discovered: %s\n", node_data);
-
-                host = str_split(node_data, ':');
-       	        fprintf(stderr, " host:%s, port: %d\n", host[0], atoi(host[1]));
-                add_new_server(nci, nci->ctx, host[0], atoi(host[1]));
-            }
-            n_max = node_cnt;
-        } else {
-       	    fprintf(stderr, " nothing to update\n");
-	}
-        sleep(5);
-    }
-    return NULL;
-}
 
 int
 main(int argc, char **argv)
 {
     rstatus_t status;
     struct instance nci;
-    pthread_t zoo_thread;
 
     nc_set_default_options(&nci);
 
@@ -753,18 +789,7 @@ main(int argc, char **argv)
         exit(1);
     }
 
-
-    if(pthread_create(&zoo_thread, NULL, zookeeper_monitor, &nci)) {
-        fprintf(stderr, "Error creating thread\n");
-        return 1;
-    }
-
     nc_run(&nci);
-
-    if(pthread_join(zoo_thread, NULL)) {
-        fprintf(stderr, "Error joining thread\n");
-        return 2;
-    }
 
     nc_post_run(&nci);
 

@@ -242,8 +242,8 @@ server_each_preconnect(void *elem, void *data)
     log_warn("XTRY: connect to server '%.*s', ignored: %s",
                  server->pname.len, server->pname.data, strerror(errno));
 
-
     status = server_connect(pool->ctx, server, conn);
+
     if (status != NC_OK) {
         log_warn("connect to server '%.*s' failed, ignored: %s",
                  server->pname.len, server->pname.data, strerror(errno));
@@ -778,9 +778,8 @@ server_pool_preconnect(struct context *ctx)
     rstatus_t status;
 
     status = array_each(&ctx->pool, server_pool_each_preconnect, NULL);
-    if (status != NC_OK) {
-        return status;
-    }
+
+    if (status != NC_OK) { return status; }
 
     return NC_OK;
 }
