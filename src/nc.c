@@ -642,7 +642,7 @@ add_new_server(struct instance *nci, struct context *ctx, char *host, int port)
     status = string_copy(&field.addrstr, (uint8_t*)host, strlen(host));
 
     field.valid = 1;
-
+    sprintf(stderr, "adding server to server pool");
 
     log_warn("XTRY: pool nelem=%d, nalloc=%d",ctx->pool.nelem, ctx->pool.nalloc);
     struct server_pool *sp = array_top(&ctx->pool);
@@ -678,25 +678,35 @@ void *zookeeper_monitor(void *arg)
     char** host;
     int n_max = 0;
 
-    printf("XTRY: zookeeper_monitor thread started\n");
+    sleep(3);
+
+    fprintf(stderr, "XTRY: zookeeper_monitor thread started\n");
     zookeeper_client * zkc_client = create_zookeeper_client();
+    fprintf(stderr, "connecting...");
     ret_val = init_zkc_connection(zkc_client, "10.2.13.66:2181", "/xtry-test");
+    fprintf(stderr, "connected!\n");
 
     for(;;) {
-        ret_val = get_child_nodes(zkc_client, "/xtry-test/xtry-inst", &node_arr, &node_cnt);
-        printf("=================================>%d nodes ",node_cnt);
-        //TODO 
+        ret_val = get_child_nodes(zkc_client, "/xtry-test/redis-inst", &node_arr, &node_cnt);
+        fprintf(stderr, "====>checking nodes: get %d nodes",node_cnt);
+        //TODO delete node 
         if(node_cnt > n_max) {
             for(i=n_max; i<node_cnt; i++) 
             {
-                ret_val = get_node_data(zkc_client, node_arr[i], &node_data);
-                printf("XTRY: ==============================> new radis node auto discovered: %s\n", node_data);
+		sprintf(buf, "/xtry-test/redis-inst/%s", node_arr[i]);
+		fprintf(stderr, " zookeeper file: %s\n", buf);
+                ret_val = get_node_data(zkc_client, buf, &node_data);
+		fprintf(stderr, "ret_val=%d\n", ret_val);
+                fprintf(stderr, "XTRY: =================> new radis node auto discovered: %s\n", node_data);
 
                 host = str_split(node_data, ':');
+       	        fprintf(stderr, " host:%s, port: %d\n", host[0], atoi(host[1]));
                 add_new_server(nci, nci->ctx, host[0], atoi(host[1]));
             }
             n_max = node_cnt;
-        }
+        } else {
+       	    fprintf(stderr, " nothing to update\n");
+	}
         sleep(5);
     }
     return NULL;
